@@ -1,0 +1,12 @@
+# udap:meta cloud=digitalocean region=nyc1 target=do-droplet
+
+user: Internet User { shape: person; udap-type: generic.user }
+vpc: DigitalOcean NYC1 {
+  droplet: Web Droplet (Django) { shape: rectangle; udap-type: do.droplet }
+  nginx: Nginx Reverse Proxy { shape: rectangle; udap-type: generic.app }
+  firewall: DO Firewall { shape: rectangle; udap-type: generic.app }
+}
+
+user -> vpc.firewall: HTTPS / HTTP (80/443)
+vpc.firewall -> vpc.nginx: allowed traffic
+vpc.nginx -> vpc.droplet: proxy_pass :8000

@@ -1,0 +1,164 @@
+version: 1
+name: python-do-webapp
+vcs: github
+
+stages:
+  - id: lint
+    kind: lint
+    needs: []
+    timeout_minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install linting tools
+        run: pip install flake8
+      - name: Run flake8
+        run: flake8 . --max-line-length=120 --exclude=migrations,venv,.venv
+
+  - id: test
+    kind: test
+    needs: [lint]
+    timeout_minutes: 15
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run tests
+        run: python manage.py test
+
+  - id: provision
+    kind: provision
+    needs: [test]
+    timeout_minutes: 30
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: nyc1
+      TF_VAR_droplet_size: s-1vcpu-1gb
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Terraform Init
+        run: |
+          cd infra
+          host="${AWS_ENDPOINT_URL_S3#https://}"
+          region="${host%%.*}"
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=${region}" \
+            -backend-config="skip_credentials_validation=true" \
+            -backend-config="skip_requesting_account_id=true" \
+            -backend-config="skip_metadata_api_check=true" \
+            -backend-config="skip_region_validation=true" \
+            -backend-config="skip_s3_checksum=true" \
+            -backend-config="use_path_style=true"
+      - name: Terraform Apply
+        run: |
+          cd infra
+          terraform apply -input=false -auto-approve
+      - name: Get Droplet IP
+        id: get_ip
+        run: |
+          cd infra
+          echo "droplet_ip=$(terraform output -raw droplet_ip)" >> "$GITHUB_OUTPUT"
+    outputs:
+      droplet_ip: ${{ steps.get_ip.outputs.droplet_ip }}
+
+  - id: configure
+    kind: configure
+    needs: [provision]
+    timeout_minutes: 30
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Ansible
+        run: pipx install ansible-core
+      - name: Install community.general collection
+        run: ansible-galaxy collection install community.general
+      - name: Write SSH key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      - name: Scan host keys
+        run: |
+          ssh-keyscan -H "${{ needs.provision.outputs.droplet_ip }}" >> ~/.ssh/known_hosts
+      - name: Generate inventory
+        run: |
+          cat > ansible/inventory.ini << 'INVENTORY'
+          [web]
+          PLACEHOLDER ansible_user=SSH_USER_TOKEN ansible_ssh_private_key_file=~/.ssh/deploy_key
+          INVENTORY
+          sed -i "s/PLACEHOLDER/${{ needs.provision.outputs.droplet_ip }}/" ansible/inventory.ini
+          sed -i "s/SSH_USER_TOKEN/${{ secrets.SSH_USER }}/" ansible/inventory.ini
+      - name: Run Ansible playbook
+        env:
+          DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+          HOST_IP: ${{ needs.provision.outputs.droplet_ip }}
+        run: |
+          ansible-playbook -i ansible/inventory.ini ansible/site.yml \
+            -e "django_secret_key=$DJANGO_SECRET_KEY" \
+            -e "host_ip=$HOST_IP"
+
+  - id: verify
+    kind: verify
+    needs: [provision, configure]
+    timeout_minutes: 10
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: nyc1
+      TF_VAR_droplet_size: s-1vcpu-1gb
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Terraform Init (read outputs)
+        run: |
+          cd infra
+          host="${AWS_ENDPOINT_URL_S3#https://}"
+          region="${host%%.*}"
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=${region}" \
+            -backend-config="skip_credentials_validation=true" \
+            -backend-config="skip_requesting_account_id=true" \
+            -backend-config="skip_metadata_api_check=true" \
+            -backend-config="skip_region_validation=true" \
+            -backend-config="skip_s3_checksum=true" \
+            -backend-config="use_path_style=true"
+      - name: Get Droplet IP
+        run: |
+          cd infra
+          echo "DROPLET_IP=$(terraform output -raw droplet_ip)" >> "$GITHUB_ENV"
+      - name: Health check
+        run: |
+          curl --fail --retry 12 --retry-delay 15 --retry-all-errors http://$DROPLET_IP/
+
+rollback:
+  strategy: manual

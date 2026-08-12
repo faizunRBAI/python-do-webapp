@@ -1,0 +1,251 @@
+---
+- name: Configure Python Django web server
+  hosts: web
+  become: true
+  gather_facts: true
+
+  vars:
+    app_dir: /opt/python_do_webapp
+    app_user: webapp
+    gunicorn_port: 8000
+    python_bin: /usr/bin/python3.11
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Wait for SSH to be available (fresh droplet race condition)
+    # -------------------------------------------------------------------------
+    - name: Wait for SSH to be available
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 120
+
+    # -------------------------------------------------------------------------
+    # System packages
+    # -------------------------------------------------------------------------
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      retries: 5
+      delay: 10
+      register: apt_update
+      until: apt_update is succeeded
+
+    - name: Install software-properties-common for PPA support
+      ansible.builtin.apt:
+        name: software-properties-common
+        state: present
+
+    - name: Add deadsnakes PPA for Python 3.11
+      ansible.builtin.apt_repository:
+        repo: ppa:deadsnakes/ppa
+        state: present
+        update_cache: true
+
+    - name: Install system dependencies
+      ansible.builtin.apt:
+        name:
+          - python3.11
+          - python3.11-venv
+          - python3-pip
+          - nginx
+          - git
+          - curl
+        state: present
+
+    # -------------------------------------------------------------------------
+    # App user (no home needed — app_dir is the home)
+    # -------------------------------------------------------------------------
+    - name: Create app user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /bin/false
+        create_home: false
+
+    # -------------------------------------------------------------------------
+    # Deploy app code
+    # -------------------------------------------------------------------------
+    - name: Create app directory
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy application code to server
+      ansible.builtin.copy:
+        src: "{{ playbook_dir | dirname }}/"
+        dest: "{{ app_dir }}/"
+        owner: root
+        group: root
+        mode: preserve
+
+    # -------------------------------------------------------------------------
+    # Python virtual environment and dependencies (run as root — writes to /opt)
+    # -------------------------------------------------------------------------
+    - name: Create Python venv
+      ansible.builtin.command:
+        cmd: "{{ python_bin }} -m venv {{ app_dir }}/venv"
+        creates: "{{ app_dir }}/venv/bin/activate"
+
+    - name: Upgrade pip in venv
+      ansible.builtin.command:
+        cmd: "{{ app_dir }}/venv/bin/pip install --upgrade pip"
+      register: pip_upgrade
+      changed_when: "'Successfully installed' in pip_upgrade.stdout"
+
+    - name: Install app requirements into venv
+      ansible.builtin.command:
+        cmd: "{{ app_dir }}/venv/bin/pip install -r {{ app_dir }}/requirements.txt"
+      register: pip_install
+      changed_when: "'Successfully installed' in pip_install.stdout"
+
+    # -------------------------------------------------------------------------
+    # Write .env file (no_log to protect secret)
+    # -------------------------------------------------------------------------
+    - name: Write .env file
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0600"
+        content: |
+          DJANGO_SECRET_KEY={{ django_secret_key }}
+          DEBUG=False
+          ALLOWED_HOSTS={{ host_ip }},localhost,127.0.0.1
+      no_log: true
+
+    # -------------------------------------------------------------------------
+    # Django migrations + static files
+    # -------------------------------------------------------------------------
+    - name: Run Django migrations
+      ansible.builtin.command:
+        cmd: "{{ app_dir }}/venv/bin/python manage.py migrate --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      environment:
+        DJANGO_SECRET_KEY: "{{ django_secret_key }}"
+        ALLOWED_HOSTS: "{{ host_ip }},localhost,127.0.0.1"
+      register: migrate_result
+      changed_when: "'No migrations to apply' not in migrate_result.stdout"
+      no_log: true
+
+    - name: Collect static files
+      ansible.builtin.command:
+        cmd: "{{ app_dir }}/venv/bin/python manage.py collectstatic --noinput"
+      args:
+        chdir: "{{ app_dir }}"
+      environment:
+        DJANGO_SECRET_KEY: "{{ django_secret_key }}"
+        ALLOWED_HOSTS: "{{ host_ip }},localhost,127.0.0.1"
+      register: collectstatic_result
+      changed_when: "'0 static files' not in collectstatic_result.stdout"
+      no_log: true
+
+    # -------------------------------------------------------------------------
+    # Gunicorn systemd service
+    # -------------------------------------------------------------------------
+    - name: Write gunicorn systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/gunicorn.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Gunicorn daemon for python-do-webapp
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          Group={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          EnvironmentFile={{ app_dir }}/.env
+          ExecStart={{ app_dir }}/venv/bin/gunicorn \
+              --workers 2 \
+              --bind 127.0.0.1:{{ gunicorn_port }} \
+              python_do_webapp.wsgi:application
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart gunicorn
+
+    - name: Enable and start gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # -------------------------------------------------------------------------
+    # Nginx reverse proxy
+    # -------------------------------------------------------------------------
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Write nginx vhost config
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/python_do_webapp
+        mode: "0644"
+        content: |
+          server {
+              listen 80;
+              server_name _;
+
+              client_max_body_size 20M;
+
+              location /static/ {
+                  alias {{ app_dir }}/staticfiles/;
+                  expires 7d;
+              }
+
+              location / {
+                  proxy_pass http://127.0.0.1:{{ gunicorn_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+      notify: Reload nginx
+
+    - name: Enable nginx vhost
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/python_do_webapp
+        dest: /etc/nginx/sites-enabled/python_do_webapp
+        state: link
+      notify: Reload nginx
+
+    - name: Ensure nginx is enabled and started
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+    # -------------------------------------------------------------------------
+    # Wait for app to be serving
+    # -------------------------------------------------------------------------
+    - name: Flush handlers before health check
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for gunicorn to be listening on 8000
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ gunicorn_port }}"
+        timeout: 60
+
+  handlers:
+    - name: Restart gunicorn
+      ansible.builtin.systemd:
+        name: gunicorn
+        state: restarted
+        daemon_reload: true
+
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
