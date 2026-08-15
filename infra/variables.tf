@@ -1,28 +1,35 @@
 variable "project_name" {
-  description = "Branch-scoped project name used as a resource prefix"
   type        = string
+  description = "Project name used as resource prefix."
 }
 
 variable "region" {
-  description = "DigitalOcean region slug"
   type        = string
-  default     = "nyc1"
-}
-
-variable "droplet_size" {
-  description = "Droplet size slug"
-  type        = string
-  default     = "s-1vcpu-1gb"
+  description = "DigitalOcean region slug."
+  default     = "sfo3"
 }
 
 variable "ssh_public_key" {
-  description = "SSH public key injected by the platform at deploy time"
   type        = string
+  description = "SSH public key material (injected by platform)."
   sensitive   = true
 }
 
-variable "do_token" {
-  description = "DigitalOcean API token"
+variable "db_password" {
   type        = string
+  description = "PostgreSQL application user password."
   sensitive   = true
+}
+
+variable "droplet_size" {
+  type        = string
+  description = "Droplet size slug."
+  default     = "s-1vcpu-1gb"
+}
+
+variable "do_token" {
+  type        = string
+  description = "DigitalOcean API token."
+  sensitive   = true
+  default     = ""
 }

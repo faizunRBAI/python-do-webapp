@@ -1,7 +1,6 @@
-import os
 import time
 
-from django.http import HttpResponse, JsonResponse
+from django.http import JsonResponse, HttpResponse
 from rest_framework.decorators import api_view
 
 from .welcome import WELCOME_HTML
@@ -20,6 +19,7 @@ def health(request):
 
 @api_view(['GET'])
 def api_info(request):
+    import os
     return JsonResponse({
         'app': 'django',
         'version': '1.0.0',

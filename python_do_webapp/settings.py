@@ -1,17 +1,13 @@
 import os
 from pathlib import Path
+
+import dj_database_url
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Accept either DJANGO_SECRET_KEY (production) or SECRET_KEY (dev/compat)
-SECRET_KEY = (
-    os.environ.get('DJANGO_SECRET_KEY')
-    or os.environ.get('SECRET_KEY', 'dev-secret-change-in-prod')
-)
-
+SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-change-in-prod')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
 
@@ -57,15 +53,15 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'python_do_webapp.wsgi.application'
 
+_default_db_url = os.environ.get('DATABASE_URL', 'sqlite:///db.sqlite3')
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(default=_default_db_url, conn_max_age=600)
 }
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-REST_FRAMEWORK = {'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny']}
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny']
+}

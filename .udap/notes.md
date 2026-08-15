@@ -1,25 +1,28 @@
-# python-do-webapp — Build Notes
-
-## Project
-- Cloud: DigitalOcean, region: nyc1, target: do-droplet
-- Stack: Python 3.11 / Django / Gunicorn / Nginx
-- VCS: GitHub
-
-## Decisions
-- Python 3.11 via deadsnakes PPA (not in Ubuntu 22.04 base apt)
-- No become_user on venv/pip tasks — runs as root to /opt, avoids setfacl issues
-- DJANGO_SECRET_KEY is the secret name (also accepts SECRET_KEY for compat)
-- Reserved IP for stable droplet address
-- playbook_dir | dirname used for correct copy src path resolution
-- app_user (webapp) owns .env and runs gunicorn; root owns the rest of /opt/python_do_webapp
-
-## Pipeline
-- lint → test → provision → configure → verify
-- provision: Terraform; configure: Ansible; verify: curl with 12 retries x 15s delay
-- TF_VAR_do_token passed in env (do_token variable in variables.tf)
+# python-do-webapp — Agent Notes
 
 ## Status
-- validate_project: PASS
-- test_project: pending
-- repo: not yet created
-- deploy: not yet triggered
+- Phase: Generation complete, pre-validation
+
+## Key Decisions
+- Region: sfo3 (NYC3 unavailable per probe)
+- Target: do-droplet (s-1vcpu-1gb, ubuntu-22-04-x64)
+- Framework: Django + Gunicorn + Nginx (platform scaffold + extensions)
+- DB: PostgreSQL local on the droplet (Tier 1 — no managed DB)
+- SSH key: platform-managed via `data.digitalocean_ssh_key.main` (DO account-scoped key)
+- settings.py: uses `os.environ.get('DATABASE_URL', 'sqlite:///db.sqlite3')` for safe CI fallback
+- Tests: converted from pytest-style to Django TestCase for `manage.py test` pipeline compatibility
+
+## Secrets Needed
+- DB_PASSWORD — random alphanumeric 24 chars (to generate at set_pipeline_secret time)
+- DJANGO_SECRET_KEY — random alphanumeric 50 chars (to generate at set_pipeline_secret time)
+
+## Known Environment
+- DigitalOcean connected, droplet quota = 3
+- GitHub connected (github)
+- Previous destroyed/failed python-do-webapp project — name is safe to reuse
+
+## Pipeline
+lint → test → provision → configure → verify
+- provision: derives Spaces backend region dynamically from SPACES_ENDPOINT hostname
+- configure: reads IP from terraform state (self-sufficient job), runs Ansible
+- verify: curl with 12 retries × 15s delay

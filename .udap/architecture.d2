@@ -1,12 +1,13 @@
-# udap:meta cloud=digitalocean region=nyc1 target=do-droplet
+# udap:meta cloud=digitalocean region=sfo3 target=do-droplet
 
 user: Internet User { shape: person; udap-type: generic.user }
-vpc: DigitalOcean NYC1 {
-  droplet: Web Droplet (Django) { shape: rectangle; udap-type: do.droplet }
+vpc: DigitalOcean SFO3 {
+  droplet: Web Server (Droplet) { shape: rectangle; udap-type: do.droplet }
   nginx: Nginx Reverse Proxy { shape: rectangle; udap-type: generic.app }
-  firewall: DO Firewall { shape: rectangle; udap-type: generic.app }
+  app: Django App (Gunicorn) { shape: rectangle; udap-type: generic.app }
+  db: PostgreSQL (local) { shape: cylinder; udap-type: generic.db }
 }
 
-user -> vpc.firewall: HTTPS / HTTP (80/443)
-vpc.firewall -> vpc.nginx: allowed traffic
-vpc.nginx -> vpc.droplet: proxy_pass :8000
+user -> vpc.nginx: HTTPS :443 / HTTP :80
+vpc.nginx -> vpc.app: proxy :8000
+vpc.app -> vpc.db: SQL queries :5432

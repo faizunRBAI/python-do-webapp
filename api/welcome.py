@@ -175,7 +175,7 @@ WELCOME_HTML = r'''<!DOCTYPE html>
       </div>
       <div class="meta-item">
         <div class="label">Region</div>
-        <div class="value">nyc1</div>
+        <div class="value">sfo3</div>
       </div>
       <div class="meta-item">
         <div class="label">Branch</div>

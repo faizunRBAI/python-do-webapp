@@ -1,35 +1,28 @@
-# Look up the platform-managed SSH key (uploaded as "udap-<project>" at cloud-prepare)
+# ── SSH Key (platform-managed, account-scoped) ──────────────────────────────
 data "digitalocean_ssh_key" "main" {
   name = "udap-${var.project_name}"
 }
 
-# Droplet
-resource "digitalocean_droplet" "web" {
-  name     = "${var.project_name}-web"
-  region   = var.region
-  size     = var.droplet_size
-  image    = "ubuntu-22-04-x64"
-  ssh_keys = [data.digitalocean_ssh_key.main.fingerprint]
+# ── Droplet ──────────────────────────────────────────────────────────────────
+resource "digitalocean_droplet" "app" {
+  name      = "${var.project_name}-web"
+  region    = var.region
+  size      = var.droplet_size
+  image     = "ubuntu-22-04-x64"
+  ssh_keys  = [data.digitalocean_ssh_key.main.fingerprint]
 
-  tags = ["${var.project_name}", "udap", "web"]
+  tags = [
+    "project:${var.project_name}",
+    "managed-by:udap"
+  ]
 }
 
-# Reserved IP for a stable public address
-resource "digitalocean_reserved_ip" "web" {
-  region = var.region
-}
+# ── Firewall ─────────────────────────────────────────────────────────────────
+resource "digitalocean_firewall" "app" {
+  name    = "${var.project_name}-fw"
+  droplet_ids = [digitalocean_droplet.app.id]
 
-resource "digitalocean_reserved_ip_assignment" "web" {
-  ip_address = digitalocean_reserved_ip.web.ip_address
-  droplet_id = digitalocean_droplet.web.id
-}
-
-# Firewall: allow SSH (22) and HTTP (80/443) inbound; all outbound
-resource "digitalocean_firewall" "web" {
-  name = "${var.project_name}-fw"
-
-  droplet_ids = [digitalocean_droplet.web.id]
-
+  # Inbound
   inbound_rule {
     protocol         = "tcp"
     port_range       = "22"
@@ -48,6 +41,7 @@ resource "digitalocean_firewall" "web" {
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
+  # Outbound (allow all)
   outbound_rule {
     protocol              = "tcp"
     port_range            = "1-65535"

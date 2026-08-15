@@ -1,54 +1,42 @@
 # python-do-webapp
 
-A Python Django web application deployed to a DigitalOcean Droplet in the `nyc1` region, fronted by Nginx and served by Gunicorn.
+A Python/Django web application deployed on DigitalOcean (sfo3) via a Droplet, fronted by Nginx, with a local PostgreSQL database.
 
 ## Architecture
 
 ```
-Internet → DO Firewall → Nginx (port 80) → Gunicorn (127.0.0.1:8000) → Django App
+Internet → Nginx (:80) → Gunicorn (:8000) → Django → PostgreSQL (local)
 ```
-
-Infrastructure is managed with **Terraform** (state on DO Spaces). Server configuration is automated with **Ansible**. CI/CD runs on **GitHub Actions**.
 
 See `.udap/architecture.d2` for the full architecture diagram.
 
----
-
 ## Stack
 
-| Layer        | Technology           |
-|--------------|----------------------|
-| Language     | Python 3.11          |
-| Framework    | Django 5             |
-| App server   | Gunicorn             |
-| Proxy        | Nginx                |
-| IaC          | Terraform            |
-| Config Mgmt  | Ansible              |
-| CI/CD        | GitHub Actions       |
-| Cloud        | DigitalOcean (nyc1)  |
-| Target       | Droplet (s-1vcpu-1gb)|
-
----
+| Layer       | Technology              |
+|-------------|-------------------------|
+| Language    | Python 3.11             |
+| Framework   | Django 5.x              |
+| App server  | Gunicorn                |
+| Proxy       | Nginx                   |
+| Database    | PostgreSQL 16 (local)   |
+| IaC         | Terraform               |
+| Config Mgmt | Ansible                 |
+| CI/CD       | GitHub Actions          |
+| Cloud       | DigitalOcean (sfo3)     |
 
 ## Local Development
 
-**Prerequisites:** Python 3.11+
-
 ```bash
-# Clone the repo
-git clone https://github.com/<your-org>/python-do-webapp.git
-cd python-do-webapp
-
-# Create and activate virtual environment
+# Create virtual environment
 python3.11 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables
+# Configure environment
 cp .env.example .env
-# Edit .env and set DJANGO_SECRET_KEY
+# Edit .env with your local values
 
 # Run migrations
 python manage.py migrate
@@ -57,73 +45,60 @@ python manage.py migrate
 python manage.py runserver
 ```
 
-The app will be available at [http://localhost:8000](http://localhost:8000).
+The app will be available at `http://localhost:8000`.
 
----
+## Running Tests
 
-## Deployment
-
-Deployment is fully automated via GitHub Actions on every push to `main`.
-
-### Pipeline stages
-
-| Stage      | What it does                                         |
-|------------|------------------------------------------------------|
-| `lint`     | Runs `flake8` for code style checks                 |
-| `test`     | Runs `python manage.py test`                        |
-| `provision`| Terraform: creates Droplet, Firewall, Reserved IP   |
-| `configure`| Ansible: installs Python, Gunicorn, Nginx, .env     |
-| `verify`   | HTTP health check with retries against the public IP|
-
-### Required secrets (set in the platform, not manually)
-
-| Secret              | Description                              |
-|---------------------|------------------------------------------|
-| `DO_TOKEN`          | DigitalOcean API token (platform-set)    |
-| `SSH_PRIVATE_KEY`   | Deploy SSH key (platform-set)            |
-| `SSH_PUBLIC_KEY`    | Deploy SSH public key (platform-set)     |
-| `SSH_USER`          | SSH login user — `root` for DO (platform)|
-| `TF_STATE_BUCKET`   | Terraform state bucket name (platform)   |
-| `PROJECT_NAME`      | Branch-scoped project name (platform)    |
-| `SPACES_ACCESS_KEY` | DO Spaces key for TF state (platform)    |
-| `SPACES_SECRET_KEY` | DO Spaces secret for TF state (platform) |
-| `SPACES_ENDPOINT`   | DO Spaces endpoint URL (platform)        |
-| `DJANGO_SECRET_KEY` | Django secret key (generated, stored)    |
-
----
-
-## Operations
-
-### Check app status on the server
 ```bash
-# SSH to the droplet (IP shown after first deploy)
-ssh root@<droplet-ip>
-systemctl status gunicorn
-systemctl status nginx
+python manage.py test --verbosity=2
 ```
-
-### View application logs
-```bash
-journalctl -u gunicorn -f
-journalctl -u nginx -f
-```
-
-### Restart the app
-```bash
-systemctl restart gunicorn
-```
-
-### Destroy infrastructure
-Use the **Destroy** action in the GitHub Actions UI (dispatches `.github/workflows/destroy.yml`).
-
----
 
 ## Configuration
 
-All configuration is driven by environment variables written to `/opt/python_do_webapp/.env` on the server by Ansible.
+All configuration is provided via environment variables (see `.env.example`):
 
-| Variable            | Required | Description                      |
-|---------------------|----------|----------------------------------|
-| `DJANGO_SECRET_KEY` | Yes      | Django cryptographic secret key  |
-| `DEBUG`             | No       | Set to `True` for dev mode only  |
-| `ALLOWED_HOSTS`     | No       | Comma-separated allowed hostnames|
+| Variable       | Description                         | Secret |
+|----------------|-------------------------------------|--------|
+| `SECRET_KEY`   | Django secret key                   | Yes    |
+| `DATABASE_URL` | PostgreSQL connection URL            | Yes    |
+| `DEBUG`        | Enable debug mode (`True`/`False`)  | No     |
+| `ALLOWED_HOSTS`| Comma-separated allowed host list   | No     |
+| `APP_ENV`      | Environment name (production, etc.) | No     |
+
+## Deployment
+
+The CI/CD pipeline in `.github/workflows/deploy.yml` handles deployment automatically on push to `main`:
+
+1. **lint** — flake8 code quality check
+2. **test** — Django test suite
+3. **provision** — Terraform provisions the DigitalOcean Droplet + Firewall
+4. **configure** — Ansible installs PostgreSQL, Nginx, Gunicorn, deploys the app
+5. **verify** — HTTP health check against the live Droplet IP
+
+## Operations
+
+**View application logs:**
+```bash
+# App logs (Gunicorn)
+journalctl -u gunicorn -f
+
+# Nginx access logs
+tail -f /var/log/nginx/access.log
+tail -f /var/log/gunicorn/access.log
+```
+
+**Restart the application:**
+```bash
+systemctl restart gunicorn
+systemctl reload nginx
+```
+
+**Run migrations manually:**
+```bash
+cd /opt/python-do-webapp
+source venv/bin/activate
+python manage.py migrate
+```
+
+**Teardown:**
+Trigger the Destroy workflow in GitHub Actions → Actions → Destroy.

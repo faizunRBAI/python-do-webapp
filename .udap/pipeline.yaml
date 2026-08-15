@@ -15,7 +15,7 @@ stages:
       - name: Install linting tools
         run: pip install flake8
       - name: Run flake8
-        run: flake8 . --max-line-length=120 --exclude=migrations,venv,.venv
+        run: flake8 . --max-line-length=120 --exclude=migrations,venv,.venv,staticfiles
 
   - id: test
     kind: test
@@ -29,7 +29,11 @@ stages:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run tests
-        run: python manage.py test
+        run: python manage.py test --verbosity=2
+        env:
+          SECRET_KEY: "ci-test-secret-key-not-for-prod"
+          DATABASE_URL: "sqlite:///test.db"
+          DEBUG: "True"
 
   - id: provision
     kind: provision
@@ -41,37 +45,38 @@ stages:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
       AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
       TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
-      TF_VAR_region: nyc1
-      TF_VAR_droplet_size: s-1vcpu-1gb
+      TF_VAR_region: sfo3
       TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
     steps:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
       - name: Terraform Init
         run: |
-          cd infra
           host="${AWS_ENDPOINT_URL_S3#https://}"
           region="${host%%.*}"
           terraform init -input=false -reconfigure \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
             -backend-config="region=${region}" \
+            -backend-config="endpoint=${AWS_ENDPOINT_URL_S3}" \
             -backend-config="skip_credentials_validation=true" \
             -backend-config="skip_requesting_account_id=true" \
             -backend-config="skip_metadata_api_check=true" \
             -backend-config="skip_region_validation=true" \
             -backend-config="skip_s3_checksum=true" \
             -backend-config="use_path_style=true"
+        working-directory: infra
       - name: Terraform Apply
-        run: |
-          cd infra
-          terraform apply -input=false -auto-approve
+        run: terraform apply -input=false -auto-approve
+        working-directory: infra
       - name: Get Droplet IP
         id: get_ip
         run: |
-          cd infra
-          echo "droplet_ip=$(terraform output -raw droplet_ip)" >> "$GITHUB_OUTPUT"
+          ip=$(terraform output -raw droplet_ip)
+          echo "droplet_ip=${ip}" >> "$GITHUB_OUTPUT"
+        working-directory: infra
+
     outputs:
       droplet_ip: ${{ steps.get_ip.outputs.droplet_ip }}
 
@@ -84,14 +89,33 @@ stages:
       AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
       AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Get Droplet IP from state
+        id: get_ip
+        run: |
+          host="${AWS_ENDPOINT_URL_S3#https://}"
+          region="${host%%.*}"
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=${region}" \
+            -backend-config="endpoint=${AWS_ENDPOINT_URL_S3}" \
+            -backend-config="skip_credentials_validation=true" \
+            -backend-config="skip_requesting_account_id=true" \
+            -backend-config="skip_metadata_api_check=true" \
+            -backend-config="skip_region_validation=true" \
+            -backend-config="skip_s3_checksum=true" \
+            -backend-config="use_path_style=true"
+          ip=$(terraform output -raw droplet_ip)
+          echo "droplet_ip=${ip}" >> "$GITHUB_OUTPUT"
+        working-directory: infra
       - name: Install Ansible
-        run: pipx install ansible-core
-      - name: Install community.general collection
+        run: pip install ansible-core
+      - name: Install Ansible collections
         run: ansible-galaxy collection install community.general
       - name: Write SSH key
         env:
@@ -101,64 +125,56 @@ stages:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
       - name: Scan host keys
-        run: |
-          ssh-keyscan -H "${{ needs.provision.outputs.droplet_ip }}" >> ~/.ssh/known_hosts
+        run: ssh-keyscan -H "${{ steps.get_ip.outputs.droplet_ip }}" >> ~/.ssh/known_hosts
       - name: Generate inventory
         run: |
-          cat > ansible/inventory.ini << 'INVENTORY'
+          cat > /tmp/inventory.ini << EOF
           [web]
-          PLACEHOLDER ansible_user=SSH_USER_TOKEN ansible_ssh_private_key_file=~/.ssh/deploy_key
-          INVENTORY
-          sed -i "s/PLACEHOLDER/${{ needs.provision.outputs.droplet_ip }}/" ansible/inventory.ini
-          sed -i "s/SSH_USER_TOKEN/${{ secrets.SSH_USER }}/" ansible/inventory.ini
+          ${{ steps.get_ip.outputs.droplet_ip }} ansible_user=${{ secrets.SSH_USER }} ansible_ssh_private_key_file=~/.ssh/deploy_key
+          EOF
       - name: Run Ansible playbook
-        env:
-          DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
-          HOST_IP: ${{ needs.provision.outputs.droplet_ip }}
         run: |
-          ansible-playbook -i ansible/inventory.ini ansible/site.yml \
-            -e "django_secret_key=$DJANGO_SECRET_KEY" \
-            -e "host_ip=$HOST_IP"
+          ansible-playbook -i /tmp/inventory.ini ansible/site.yml
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+          PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
 
   - id: verify
     kind: verify
-    needs: [provision, configure]
+    needs: [configure, provision]
     timeout_minutes: 10
     env:
       DIGITALOCEAN_TOKEN: ${{ secrets.DO_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_KEY }}
       AWS_ENDPOINT_URL_S3: ${{ secrets.SPACES_ENDPOINT }}
-      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
-      TF_VAR_region: nyc1
-      TF_VAR_droplet_size: s-1vcpu-1gb
-      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-      TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
     steps:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
-      - name: Terraform Init (read outputs)
+      - name: Get Droplet IP from state
+        id: get_ip
         run: |
-          cd infra
           host="${AWS_ENDPOINT_URL_S3#https://}"
           region="${host%%.*}"
           terraform init -input=false -reconfigure \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
             -backend-config="region=${region}" \
+            -backend-config="endpoint=${AWS_ENDPOINT_URL_S3}" \
             -backend-config="skip_credentials_validation=true" \
             -backend-config="skip_requesting_account_id=true" \
             -backend-config="skip_metadata_api_check=true" \
             -backend-config="skip_region_validation=true" \
             -backend-config="skip_s3_checksum=true" \
             -backend-config="use_path_style=true"
-      - name: Get Droplet IP
-        run: |
-          cd infra
-          echo "DROPLET_IP=$(terraform output -raw droplet_ip)" >> "$GITHUB_ENV"
+          ip=$(terraform output -raw droplet_ip)
+          echo "droplet_ip=${ip}" >> "$GITHUB_OUTPUT"
+        working-directory: infra
       - name: Health check
         run: |
-          curl --fail --retry 12 --retry-delay 15 --retry-all-errors http://$DROPLET_IP/
+          curl --fail --retry 12 --retry-delay 15 --retry-all-errors \
+            http://${{ steps.get_ip.outputs.droplet_ip }}/
 
 rollback:
   strategy: manual
